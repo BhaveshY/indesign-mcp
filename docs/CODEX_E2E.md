@@ -41,4 +41,6 @@ Steps (record PASS/FAIL + evidence for each):
 12. save_copy the doc twice into scratch\batch\ ("Blatt A.indd", "Blatt B.indd"), then indesign_document action=batch folder=scratch\batch fill={data:{Bauherr:"WBM"}} preflight=true export={format:"pdf", dir:"scratch\batch\pdf", pages:"1"} → expect ok=2 and filled=1 per file; verify the PDFs exist and that the .indd files were not modified (no save=true).
 13. Cleanup: close the test document with save=false (close without save must first error with code unsaved_changes, then succeed with save=false). indesign_status must not list the test document anymore.
 
+If any call returns bad_response or unknown_result, follow error.next, include the error's probe/vt fields in the report, and append the last 20 lines of %LOCALAPPDATA%\indesign-mcp\server.log.
+
 Final report: a table Step | Result | Evidence (key values, ids, counts, timings if visible), then a list of any bugs or confusing tool behaviour with the exact call and response, and suggestions to improve tool descriptions. Do not fix anything in the repo.

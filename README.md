@@ -59,4 +59,7 @@ python scripts\jsxcheck.py   # syntax-check runtime.jsx inside InDesign's Extend
 - **Grid fitting**: `grid` uses `fit: "fill"` by default, which crops each image to fill its cell. Use `"proportional"` to show whole images.
 - **Batch and source files**: batch only saves the source files if you pass `save: true`.
 - **Reading props**: `read what=item props=[...]` looks on the frame first, then on its text (returned as `text.pointSize`). Names it can't find are listed in `unsupported`.
+- **If InDesign returns nothing**: the server logs a diagnostic line to `%LOCALAPPDATA%\indesign-mcp\server.log` and switches to its safe, non-persistent execution mode for the rest of the session.
+  - Read-only calls (reads, status, capture, export, save_copy) are retried automatically.
+  - Writes return `unknown_result`, meaning the change may or may not have been applied. Check with `indesign_read` before retrying.
 - **Codex acceptance test**: the prompt is in [docs/CODEX_E2E.md](docs/CODEX_E2E.md).

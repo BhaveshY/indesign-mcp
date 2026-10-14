@@ -166,8 +166,9 @@ TOOLS = [
         "title": "Run ExtendScript",
         "description": (
             "Run ExtendScript (ES3, no JSON/indexOf) as a function body; `return` a value (auto-serialized). In scope: app, D (target "
-            "doc or null), A (args), item(id|name), page(n), info(item), setProps(obj,props), doc(sel), J(v). Units per `units` "
-            "(default mm). undo=true (default) groups changes as one undo step."
+            "doc or null), A (args), item(id|name), page(n), info(item), setProps(obj,props), doc(sel), J(v). DOM values are in "
+            "points unless `units` is given. undo=true (default) asks InDesign to record the script as one undo step for the user's "
+            "Edit > Undo; scripts cannot undo themselves in CS6, so a failing script may leave partial changes."
         ),
         "inputSchema": {"type": "object", "required": ["code"], "properties": {
             "code": {"type": "string"}, "args": {"type": "object"}, "doc": _doc, "units": _units, "undo": {"type": "boolean"}}},

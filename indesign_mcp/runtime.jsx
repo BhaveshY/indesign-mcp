@@ -44,6 +44,7 @@ function valid(o) { try { return o && o.isValid; } catch (e) { return false; } }
 
 function enumName(cls, v) {
   var n = +v;
+  if (n === +NothingEnum.NOTHING) return 'NOTHING';   // "unspecified" sentinel (e.g. style attributes left open)
   var cands = cls ? [cls] : [];
   for (var c = 0; c < cands.length; c++) {
     var C = $.global[cands[c]];

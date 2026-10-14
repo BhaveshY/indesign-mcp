@@ -13,7 +13,7 @@ import uuid
 from . import com
 from .tools import TOOLS, INSTRUCTIONS
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 PROGIDS = [p for p in os.environ.get("INDESIGN_PROGID", "").split(";") if p] + [
     "InDesign.Application.2026", "InDesign.Application.2025", "InDesign.Application.2024", "InDesign.Application.2023",
     "InDesign.Application.CS6", "InDesign.Application"]
@@ -55,6 +55,22 @@ def indesign_running():
     finally:
         k.CloseHandle(snap)
     return False
+
+
+LOG_PATH = os.path.join(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()), "indesign-mcp", "server.log")
+
+
+def log(event, **fields):
+    """Append one JSON line to the diagnostics log (kept under ~1 MB)."""
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 1_000_000:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"), "pid": os.getpid(), "v": __version__,
+                                "rt": RUNTIME_VERSION, "event": event, **fields}, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass
 
 
 class ToolError(Exception):
@@ -119,29 +135,68 @@ class Bridge:
                                     "Close any dialog in InDesign, then retry once.")
                 raise ToolError("indesign_error", str(e), "Check the arguments; InDesign rejected the script.")
 
-    def execute(self, tool, args, undo_name=None, launch=False, timeout=TIMEOUT):
+    persistent = True   # cleared for the rest of the session if the persistent engine ever returns no result
+
+    def _probe(self):
+        try:
+            return str(self._doscript(ENGINE + "var m=$.global.__idmcp; (typeof m) + '|' + (m ? m.v : '') + '|' + $.engineName"))
+        except Exception as e:  # noqa: BLE001
+            return f"probe failed: {e}"
+
+    def execute(self, tool, args, undo_name=None, launch=False, timeout=TIMEOUT, safe_retry=False):
         call = "(" + json.dumps(args, ensure_ascii=True) + ", " + json.dumps(tool) + ")"
         stub = (ENGINE + "(function(){var m=$.global.__idmcp;if(!m||m.v!==" + json.dumps(RUNTIME_VERSION) + ")return "
                 + json.dumps(RELOAD) + ";return m.run" + call + ";})();")
+        load = ENGINE + RUNTIME + "\n$.global.__idmcp.run" + call + ";"
+        main = RUNTIME + "\n$.global.__idmcp.run" + call + ";"   # main engine: parsed per call, nothing persists
+        info = {}
 
         def work():
             if launch:
                 self._connect(launch=True)
+            if not self.persistent:
+                return self._doscript(main, undo_name)
             out = self._doscript(stub, undo_name)
             if out == RELOAD:   # first call, InDesign restarted, or runtime changed: load it once
-                out = self._doscript(ENGINE + RUNTIME + "\n$.global.__idmcp.run" + call + ";", undo_name)
+                out = self._doscript(load, undo_name)
+            if isinstance(out, str):
+                return out
+            # No result from the persistent engine: record why, stop using it, and only retry when re-running is harmless.
+            info["vt"] = getattr(self.app, "last_vt", None)   # COM type of the empty reply (read before probing)
+            info["probe"] = self._probe()
+            self.persistent = False
+            log("empty_reply", tool=tool, action=args.get("action") or args.get("what"), vt=info["vt"], probe=info["probe"])
+            if safe_retry:
+                out = self._doscript(main, undo_name)
+                log("fallback_main_engine", tool=tool, ok=isinstance(out, str))
             return out
         raw = self.run(work, timeout)
+        if not isinstance(raw, str):
+            if safe_retry:
+                raise ToolError("bad_response", "InDesign returned no result, even after a retry.",
+                                "Call indesign_status; if InDesign shows a dialog close it, otherwise restart InDesign. "
+                                "Details are in " + LOG_PATH, **info)
+            raise ToolError("unknown_result", "InDesign returned no result: this write may or may not have been applied.",
+                            "Do NOT resend blindly. Check the affected items/document with indesign_read first; the server has "
+                            "switched to its safe execution mode, so a retry after checking is fine. Details: " + LOG_PATH, **info)
         try:
             res = json.loads(raw)
-        except (TypeError, ValueError):
-            raise ToolError("bad_response", f"Unexpected InDesign reply: {str(raw)[:300]}")
+        except ValueError:
+            log("bad_json", tool=tool, raw=raw[:300])
+            raise ToolError("bad_response", f"Unexpected InDesign reply: {raw[:300]}",
+                            "Check state with indesign_read before retrying; details in " + LOG_PATH)
         if not res.get("ok"):
             err = res.get("error") or {}
-            raise ToolError(err.pop("code", "indesign_error"), err.pop("message", "error"), err.pop("next", None), **err)
+            code = err.pop("code", "indesign_error")
+            nxt = err.pop("next", None) or ("Fix the arguments per the tool description; re-read the current state before retrying."
+                                            if code != "indesign_error" else
+                                            "InDesign rejected the call: check ids/names/values with indesign_read, then retry once.")
+            raise ToolError(code, err.pop("message", "error"), nxt, **err)
         return res["result"]
 
 
+# Document actions that are harmless to re-run (read-only or overwrite the same output file).
+SAFE_DOC_ACTIONS = {"info", "preflight", "export", "save_copy", "zoom", "activate"}
 BRIDGE = None
 
 
@@ -163,24 +218,25 @@ def call_tool(name, args):
         launch = bool(args.get("launch"))
         if not launch and not indesign_running():
             return [{"type": "text", "text": _dump({"running": False, "next": "Start InDesign or call indesign_status launch=true"})}]
-        res = b.execute("status", {}, launch=launch)
+        res = b.execute("status", {}, launch=launch, safe_retry=True)
         res["running"] = True
         res["server"] = __version__
         return [{"type": "text", "text": _dump(res)}]
     if name == "indesign_read":
-        return [{"type": "text", "text": _dump(b.execute("read", args))}]
+        return [{"type": "text", "text": _dump(b.execute("read", args, safe_retry=True))}]
     if name == "indesign_apply":
         label = str(args.get("label") or "MCP edit")[:60]
         res = b.execute("apply", args, undo_name=label)
         res["ms"] = int((time.perf_counter() - t0) * 1000)
         return [{"type": "text", "text": _dump(res)}]
     if name == "indesign_document":
-        to = BATCH_TIMEOUT if args.get("action") == "batch" else TIMEOUT
-        return [{"type": "text", "text": _dump(b.execute("document", args, timeout=to))}]
+        act = args.get("action")
+        to = BATCH_TIMEOUT if act == "batch" else TIMEOUT
+        return [{"type": "text", "text": _dump(b.execute("document", args, timeout=to, safe_retry=act in SAFE_DOC_ACTIONS))}]
     if name == "indesign_capture":
         path = os.path.join(tempfile.gettempdir(), f"indesign-mcp-{uuid.uuid4().hex}.png")
         a = dict(args, path=path)
-        res = b.execute("capture", a)
+        res = b.execute("capture", a, safe_retry=True)
         try:
             with open(res["path"], "rb") as f:
                 data = base64.b64encode(f.read()).decode("ascii")

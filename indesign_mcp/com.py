@@ -159,6 +159,7 @@ class Dispatch:
                     if hr2 in BUSY_CODES or hr2 in GONE_CODES:
                         hr = hr2
             raise ComError(hr, msg)
+        self.last_vt = res.vt   # kept for diagnostics of unexpected result types
         try:
             return self._value(res)
         finally:
