@@ -255,7 +255,11 @@ function info(it, full) {
   try { var os = nm(it.appliedObjectStyle); if (full && os) o.ostyle = os; } catch (e11) {}
   if (full) {
     try { o.stroke_w = it.strokeWeight; o.opacity = it.transparencySettings.blendingSettings.opacity; } catch (e12) {}
-    if (t === 'TextFrame') { try { var tp = it.textFramePreferences; o.columns = tp.textColumnCount; o.inset_pt = tp.insetSpacing; o.vjust = enumName('VerticalJustification', tp.verticalJustification); } catch (e13) {} }
+    if (t === 'TextFrame') {
+      try { var tp = it.textFramePreferences; o.columns = tp.textColumnCount; o.inset_pt = tp.insetSpacing; o.vjust = enumName('VerticalJustification', tp.verticalJustification); } catch (e13) {}
+      // Formatting of the first character (pt), so text size/font can be verified without a separate text read.
+      try { var c0 = it.parentStory.characters[0]; if (valid(c0)) o.text_format = { font: c0.appliedFont.name, size: c0.pointSize, leading: c0.leading === Leading.AUTO ? 'AUTO' : c0.leading, color: nm(c0.fillColor), pstyle: nm(c0.appliedParagraphStyle), cstyle: nm(c0.appliedCharacterStyle) }; } catch (e14) {}
+    }
   }
   return o;
 }
@@ -266,17 +270,36 @@ function pageInfo(pg) {
   try { var m = marginBox(pg); o.margin_box = [ou(m[0]), ou(m[1]), ou(m[2]), ou(m[3])]; o.columns = pg.marginPreferences.columnCount; o.gutter = ou(pg.marginPreferences.columnGutter); } catch (e3) {}
   return o;
 }
+function propVal(k, v) {
+  if (ctor(v) === 'Enumerator') return enumName(cap(k), v);
+  if (typeof v === 'object' && v !== null && !(v instanceof Array) && ctor(v) !== 'Object' && !(v instanceof File)) { try { return v.name !== undefined ? v.name : ref(v); } catch (e) { return ctor(v); } }
+  return v;
+}
 function propsOf(o, keys) {
   var p = o.properties, out = {};
   for (var k in p) {
     if (keys && !has(keys, k)) continue;
     var v = p[k];
     if (v === null || v === undefined || typeof v === 'function') continue;
-    if (ctor(v) === 'Enumerator') { out[k] = enumName(cap(k), v); continue; }
-    if (typeof v === 'object' && !(v instanceof Array) && ctor(v) !== 'Object' && !(v instanceof File)) { try { out[k] = v.name !== undefined ? v.name : ref(v); } catch (e) { out[k] = ctor(v); } continue; }
-    out[k] = v;
+    out[k] = propVal(k, v);
   }
   return out;
+}
+// Requested props for `what=item`: item first, then (for text containers) the first character; unknown names reported.
+function itemProps(it, keys) {
+  if (keys === true) return { props: propsOf(it) };
+  var out = propsOf(it, keys), txt = null, miss = [], i;
+  try { if (it.parentStory) txt = it.parentStory.characters[0]; else if (ctor(it) === 'Story') txt = it.characters[0]; } catch (e) {}
+  for (i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (out.hasOwnProperty(k)) continue;
+    var v; try { v = it[k]; } catch (e1) { v = undefined; }
+    if (v === undefined && valid(txt)) { try { v = txt[k]; if (v !== undefined) k = 'text.' + k; } catch (e2) { v = undefined; } }
+    if (v === undefined) miss.push(keys[i]); else out[k] = propVal(keys[i], v);
+  }
+  var r = { props: out };
+  if (miss.length) r.unsupported = miss;
+  return r;
 }
 function page2(list, a, def) {
   var off = a.offset || 0, lim = a.limit || def || 100, out = [];
@@ -317,7 +340,9 @@ function docInfo(d, brief) {
   var ls = []; for (var i = 0; i < d.layers.length; i++) { var L = d.layers[i]; ls.push(L.name + (L.visible ? '' : ' (hidden)') + (L.locked ? ' (locked)' : '')); }
   o.layers = ls;
   var ms = []; for (i = 0; i < d.masterSpreads.length; i++) ms.push(d.masterSpreads[i].name); o.masters = ms;
-  o.counts = { items: d.allPageItems.length, stories: d.stories.length, links: d.links.length, tables: 0, pstyles: d.allParagraphStyles.length, cstyles: d.allCharacterStyles.length, ostyles: d.allObjectStyles.length, swatches: d.swatches.length };
+  // items = top-level items on spreads incl. pasteboard (same scope as read what=items); all_items adds group children + placed graphics.
+  var top = 0; for (var sp0 = 0; sp0 < d.spreads.length; sp0++) top += d.spreads[sp0].pageItems.length;
+  o.counts = { items: top, all_items: d.allPageItems.length, stories: d.stories.length, links: d.links.length, tables: 0, pstyles: d.allParagraphStyles.length, cstyles: d.allCharacterStyles.length, ostyles: d.allObjectStyles.length, swatches: d.swatches.length };
   for (i = 0; i < d.stories.length; i++) o.counts.tables += d.stories[i].tables.length;
   o.issues = issues(d, 10);
   return o;
@@ -380,6 +405,7 @@ function hitInfo(t, full) {
   return o;
 }
 function swatchInfo(s) {
+  s = spec(s);   // swatches collection yields generic Swatch; resolve to Color/Tint/Gradient for values
   var o = { name: s.name, type: ctor(s) };
   try { if (o.type === 'Color') { o.space = enumName('ColorSpace', s.space); o.model = enumName('ColorModel', s.model); o.values = s.colorValue; } } catch (e) {}
   try { if (o.type === 'Tint') { o.base = s.baseColor.name; o.tint = s.tintValue; } } catch (e2) {}
@@ -406,7 +432,11 @@ function read(a) {
       var its = filterItems(a), r = page2(its, a, 100);
       for (i = 0; i < r.items.length; i++) r.items[i] = info(r.items[i], a.detail); return r;
     }
-    case 'item': { var it = item(a.id); var o = info(it, true); if (a.props) o.props = propsOf(it, a.props === true ? null : a.props); return o; }
+    case 'item': {
+      var it = item(a.id), o = info(it, true);
+      if (a.props) { var pr = itemProps(it, a.props); o.props = pr.props; if (pr.unsupported) o.unsupported = pr.unsupported; }
+      return o;
+    }
     case 'text': {
       if (a.id !== undefined) return storyText(story(a.id), a);
       list = []; for (i = 0; i < D.stories.length; i++) { var s = D.stories[i]; list.push({ story: s.id, chars: s.characters.length, overset: s.overflows, frames: s.textContainers.length, text: trunc(s.contents, 60) }); }
@@ -885,16 +915,22 @@ function apply(a) {
     var o = ops[i]; if (!OPS[o.op]) throw E('bad_args', 'ops[' + i + ']: unknown op "' + o.op + '"', 'ops: ' + keys(OPS).join('|'));
     try { precheck(o.op, o); } catch (e) { e.message = 'ops[' + i + '] ' + o.op + ': ' + e.message; e.op = i; throw e; }
   }
-  for (i = 0; i < ops.length; i++) {
-    try { var r = OPS[ops[i].op](ops[i]); r.op = ops[i].op; res.push(r); }
-    catch (e2) {
-      var keep = !!a.keep_partial; if (!keep) cleanupCreated();
-      var err = E(e2.code || 'op_failed', 'ops[' + i + '] ' + ops[i].op + ': ' + e2.message + (!e2.code && e2.line ? ' (runtime line ' + e2.line + ')' : ''), e2.next || 'fix this op and resend the batch');
-      err.op = i; err.done = res; err.rolled_back = keep ? 'none' : 'created items removed; edits from ops[0..' + (i - 1) + '] stay (undo with indesign_document action=undo if needed)';
-      if (i === 0) err.rolled_back = 'nothing changed';
-      throw err;
+  // typographic_quotes:false keeps " and ' literal in text set by this batch (InDesign converts them by default).
+  var tpref = D.textPreferences, oldQ = null;
+  if (a.typographic_quotes !== undefined) { oldQ = tpref.typographersQuotes; tpref.typographersQuotes = !!a.typographic_quotes; }
+  try {
+    for (i = 0; i < ops.length; i++) {
+      try { var r = OPS[ops[i].op](ops[i]); r.op = ops[i].op; res.push(r); }
+      catch (e2) {
+        var keep = !!a.keep_partial; if (!keep) cleanupCreated();
+        var err = E(e2.code || 'op_failed', 'ops[' + i + '] ' + ops[i].op + ': ' + e2.message + (!e2.code && e2.line ? ' (runtime line ' + e2.line + ')' : ''), e2.next || 'fix this op and resend the batch');
+        err.op = i; err.done = res;
+        err.rolled_back = i === 0 && !CREATED.length ? 'no items created; ops[0] may be partially applied (check with indesign_read)' : (keep ? 'none (keep_partial)' :
+          'NOT atomic: items created by this batch were removed, but other edits from ops[0..' + (i - 1) + '] (and any partial edit by ops[' + i + ']) remain; scripted undo is unavailable in CS6, so revert them with explicit ops');
+        throw err;
+      }
     }
-  }
+  } finally { if (oldQ !== null) try { tpref.typographersQuotes = oldQ; } catch (e3) {} }
   return { results: res, doc: D.name };
 }
 function keys(o) { var a = []; for (var k in o) if (o.hasOwnProperty(k)) a.push(k); return a; }

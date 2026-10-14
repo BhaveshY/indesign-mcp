@@ -13,7 +13,7 @@ import uuid
 from . import com
 from .tools import TOOLS, INSTRUCTIONS
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 PROGIDS = [p for p in os.environ.get("INDESIGN_PROGID", "").split(";") if p] + [
     "InDesign.Application.2026", "InDesign.Application.2025", "InDesign.Application.2024", "InDesign.Application.2023",
     "InDesign.Application.CS6", "InDesign.Application"]

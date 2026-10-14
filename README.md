@@ -54,4 +54,9 @@ python scripts\jsxcheck.py   # syntax-check runtime.jsx inside InDesign's Extend
 - PDF exports restore your own PDF export preferences afterwards.
 - If InDesign is not running, the server reports `not_running` rather than starting it. To start it, call `indesign_status` with `launch=true`.
 - If a call takes longer than 180 s (set `INDESIGN_MCP_TIMEOUT` to change this), the server returns `timeout`. This usually means a dialog is open in InDesign.
-- Scripted `undo()` is unreliable in CS6, so a failed batch only removes the items it created. Edits made by earlier ops in that batch are reported in `error.done`.
+- **Batches are not atomic.** CS6 scripting cannot undo, so when an op fails mid-batch the server removes only the items that batch created. Other edits stay, and `error.done` lists what already ran.
+- **Quotes**: InDesign converts straight quotes to typographic ones. Pass `typographic_quotes: false` on `indesign_apply` to keep `"` and `'` literal, e.g. for dimensions such as `5'`.
+- **Grid fitting**: `grid` uses `fit: "fill"` by default, which crops each image to fill its cell. Use `"proportional"` to show whole images.
+- **Batch and source files**: batch only saves the source files if you pass `save: true`.
+- **Reading props**: `read what=item props=[...]` looks on the frame first, then on its text (returned as `text.pointSize`). Names it can't find are listed in `unsupported`.
+- **Codex acceptance test**: the prompt is in [docs/CODEX_E2E.md](docs/CODEX_E2E.md).

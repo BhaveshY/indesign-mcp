@@ -135,6 +135,24 @@ def v11(c, doc, img):
     print(f"      read latency median {ts[5]:.1f} ms, min {ts[0]:.1f} ms")
 
 
+def v12(c, doc):
+    """Fixes from the Codex acceptance run."""
+    sw, _ = c.call("indesign_read", {"doc": doc, "what": "swatches"})
+    blue = next(x for x in sw if x["name"] == "EBA Blue")
+    check("swatch values", blue.get("space") == "CMYK" and blue.get("values") == [90, 50, 0, 0], json.dumps(blue))
+    it, _ = c.call("indesign_read", {"doc": doc, "what": "item", "id": "Title", "props": ["pointSize", "fillColor", "noSuchProperty"]})
+    check("item text props + unsupported", it["props"].get("text.pointSize") == 28 and it.get("unsupported") == ["noSuchProperty"]
+          and it.get("text_format", {}).get("size") == 28, json.dumps(it, ensure_ascii=False)[:300])
+    d, _ = c.call("indesign_read", {"doc": doc, "what": "document"})
+    tot, _ = c.call("indesign_read", {"doc": doc, "what": "items", "limit": 1})
+    check("counts scope", d["counts"]["items"] == tot["total"] and d["counts"]["all_items"] >= tot["total"], json.dumps(d["counts"]))
+    c.call("indesign_apply", {"doc": doc, "typographic_quotes": False, "ops": [
+        {"op": "create", "kind": "text", "page": 1, "x": 120, "y": 200, "w": 60, "h": 10, "text": 'Typ "A" 5\'', "name": "Quotes"}]})
+    q, _ = c.call("indesign_read", {"doc": doc, "what": "text", "id": "Quotes", "raw": True})
+    check("typographic_quotes=false", q["text"] == 'Typ "A" 5\'', q["text"])
+    c.call("indesign_apply", {"doc": doc, "ops": [{"op": "delete", "id": "Quotes"}]})
+
+
 def main():
     c = Client()
     t = time.perf_counter()
@@ -233,6 +251,7 @@ def main():
     c.call("indesign_apply", {"doc": doc, "ops": [{"op": "set", "id": "Title", "props": {"fill": "No Such Swatch"}}]}, expect_error=True)
 
     v11(c, doc, img)
+    v12(c, doc)
 
     for args in ({"doc": doc, "page": 1}, {"doc": doc, "id": "Render"}, {"doc": doc, "page": 2, "max_px": 600}):
         _, raw = c.call("indesign_capture", args)
