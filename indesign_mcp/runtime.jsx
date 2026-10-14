@@ -1,7 +1,8 @@
-// InDesign MCP runtime (ExtendScript / ES3). Python injects `var __A = {...}, __T = "tool";` before this file.
-// Coordinates: x,y,w,h relative to the item's page top-left, in __A.units (default mm). Pages are 1-based.
-(function () {
-var A = __A || {}, TOOL = __T;
+// InDesign MCP runtime (ExtendScript / ES3). Loaded once into the persistent engine "indesign_mcp";
+// the server then calls $.global.__idmcp.run(args, tool) (~1 ms instead of re-parsing this file every call).
+// Coordinates: x,y,w,h relative to the item's page top-left, in A.units (default mm). Pages are 1-based.
+$.global.__idmcp = { v: '%VERSION%', run: function (A, TOOL) {
+A = A || {};
 
 // ---------- JSON ----------
 var ESC = { '"': '\\"', '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' };
@@ -262,6 +263,7 @@ function pageInfo(pg) {
   var b = pg.bounds, o = { page: pageNo(pg), name: pg.name, w: ou(b[3] - b[1]), h: ou(b[2] - b[0]), items: pg.pageItems.length };
   try { o.master = pg.appliedMaster ? pg.appliedMaster.name : null; } catch (e) { o.master = null; }
   try { o.side = enumName('PageSideOptions', pg.side); } catch (e2) {}
+  try { var m = marginBox(pg); o.margin_box = [ou(m[0]), ou(m[1]), ou(m[2]), ou(m[3])]; o.columns = pg.marginPreferences.columnCount; o.gutter = ou(pg.marginPreferences.columnGutter); } catch (e3) {}
   return o;
 }
 function propsOf(o, keys) {
@@ -512,6 +514,53 @@ function ensureStyle(kind, name, basedOn, props) {
 }
 function cleanupCreated() { for (var i = CREATED.length - 1; i >= 0; i--) { try { if (valid(CREATED[i])) CREATED[i].remove(); } catch (e) {} } }
 
+// Live area of a page as [x, y, w, h] in points, page-relative (handles left-hand pages of facing docs).
+function marginBox(pg) {
+  var b = pg.bounds, mp = pg.marginPreferences, W = b[3] - b[1], H = b[2] - b[0], left = mp.left, right = mp.right;
+  try { if (pg.side === PageSideOptions.LEFT_HAND) { left = mp.right; right = mp.left; } } catch (e) {}
+  return [left, mp.top, W - left - right, H - mp.top - mp.bottom];
+}
+function fname(f) { return decodeURI(f.name); }
+var IMG_RE = /\.(jpe?g|png|tiff?|psd|pdf|ai|eps|gif|bmp)$/i;
+function filesFrom(a, re) {
+  var out = [], i, rx = a.pattern ? new RegExp(a.pattern, 'i') : re;
+  if (a.files) for (i = 0; i < a.files.length; i++) { var f = File(a.files[i]); if (!f.exists) throw E('not_found', 'File not found: ' + a.files[i]); out.push(f); }
+  if (a.folder) { var fo = Folder(a.folder); if (!fo.exists) throw E('not_found', 'Folder not found: ' + a.folder); walk(fo, 0); }
+  function walk(fo, depth) {
+    var l = fo.getFiles(); l.sort(function (x, y) { var p = lower(fname(x)), p2 = lower(fname(y)); return p < p2 ? -1 : p > p2 ? 1 : 0; });
+    for (var j = 0; j < l.length; j++) { if (l[j] instanceof Folder) { if (a.recursive && depth < 8) walk(l[j], depth + 1); } else if (rx.test(fname(l[j]))) out.push(l[j]); }
+  }
+  return out;
+}
+function readCsv(path, delim, enc) {
+  var f = File(path); if (!f.exists) throw E('not_found', 'CSV not found: ' + path);
+  function rd(e) { f.encoding = e; f.open('r'); var t = f.read(); f.close(); return t; }
+  var s = rd(enc || 'UTF-8');
+  // Excel on German Windows writes ANSI; ExtendScript returns '' (or U+FFFD) for invalid UTF-8.
+  if (!enc && (!s || s.indexOf('\ufffd') >= 0) && f.length > 0) s = rd('CP1252');
+  s = s || '';
+  if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1);
+  if (!delim) {
+    var first = s.split(/\r\n|\r|\n/)[0], best = ';', n = first.split(';').length;
+    if (first.split('\t').length > n) { best = '\t'; n = first.split('\t').length; }
+    if (first.split(',').length > n) best = ',';
+    delim = best;
+  }
+  var rows = [], row = [], fld = '', inq = false, ch;
+  for (var i = 0; i < s.length; i++) {
+    ch = s.charAt(i);
+    if (inq) { if (ch === '"') { if (s.charAt(i + 1) === '"') { fld += '"'; i++; } else inq = false; } else fld += ch; }
+    else if (ch === '"') inq = true;
+    else if (ch === delim) { row.push(fld); fld = ''; }
+    else if (ch === '\r' || ch === '\n') { if (ch === '\r' && s.charAt(i + 1) === '\n') i++; row.push(fld); rows.push(row); row = []; fld = ''; }
+    else fld += ch;
+  }
+  if (fld !== '' || row.length) { row.push(fld); rows.push(row); }
+  return rows;
+}
+function moveBy(it, dx, dy) { if (dx || dy) it.move(undefined, [dx, dy]); }
+function escGrep(t) { return t.replace(/([\\^$.|?*+()\[\]{}~])/g, '\\$1'); }
+
 var OPS = {
   create: function (a) {
     var it = addFrame(a, a.kind || 'rect');
@@ -637,7 +686,9 @@ var OPS = {
   table: function (a) {
     var fr = a.id !== undefined ? item(a.id) : addFrame(a, 'text');
     if (ctor(fr) !== 'TextFrame') throw E('bad_target', 'table needs a text frame id or page,x,y,w,h');
-    var data = a.data || [], rows = a.rows || data.length || 2, cols = a.cols || (data[0] ? data[0].length : 2);
+    var data = a.csv ? readCsv(a.csv, a.delimiter, a.encoding) : (a.data || []), mc = 0;
+    for (var q0 = 0; q0 < data.length; q0++) if (data[q0].length > mc) mc = data[q0].length;
+    var rows = a.rows || data.length || 2, cols = a.cols || mc || 2;
     var hdr = a.header_rows || 0;
     var t = fr.parentStory.insertionPoints[-1].tables.add({ bodyRowCount: rows - hdr, columnCount: cols, headerRowCount: hdr });
     if (isNum(fr.geometricBounds[3])) { try { var w = fr.geometricBounds[3] - fr.geometricBounds[1] - 0.01; t.width = w; } catch (e) {} }
@@ -659,12 +710,140 @@ var OPS = {
     return { table: t.id, cells: n, rows: t.rows.length };
   },
   relink: function (a) {
+    if (a.folder) {
+      var idx = {}, fl = filesFrom({ folder: a.folder, recursive: a.recursive !== false }, /./), i, n = 0, miss = [];
+      for (i = 0; i < fl.length; i++) { var key = lower(fname(fl[i])); if (!idx[key]) idx[key] = fl[i]; }
+      var lks = D.links.everyItem().getElements();
+      for (i = 0; i < lks.length; i++) {
+        if (!a.all && lks[i].status !== LinkStatus.LINK_MISSING) continue;
+        var hit = idx[lower(lks[i].name)];
+        if (hit) { lks[i].relink(hit); n++; } else miss.push(lks[i].name);
+      }
+      return { relinked: n, still_missing: miss, searched: fl.length };
+    }
     var l, f = a.file ? File(a.file) : null;
     if (a.link !== undefined) { l = isNum(a.link) ? D.links.itemByID(a.link) : D.links.itemByName(a.link); if (!valid(l)) throw E('not_found', 'Link not found: ' + a.link); }
     if (f) { if (!f.exists) throw E('not_found', 'File not found: ' + a.file); l.relink(f); return { link: l.name, status: enumName('LinkStatus', l.status) }; }
     var n = 0, ls = l ? [l] : D.links.everyItem().getElements();
     for (var i = 0; i < ls.length; i++) if (ls[i].status === LinkStatus.LINK_OUT_OF_DATE) { ls[i].update(); n++; }
     return { updated: n };
+  },
+  fill: function (a) {
+    // Placeholder fill: map {"{{Projekt}}": "Neubau"} and/or data {Projekt: "Neubau"} with token "{{%s}}".
+    var map = {}, k, j, counts = {}, total = 0, tok = a.token || '{{%s}}';
+    if (a.map) for (k in a.map) if (a.map.hasOwnProperty(k)) map[k] = a.map[k];
+    if (a.data) for (k in a.data) if (a.data.hasOwnProperty(k)) map[tok.replace('%s', k)] = a.data[k];
+    var scope = a.id !== undefined ? story(a.id) : D, o = app.findChangeTextOptions;
+    app.findTextPreferences = NothingEnum.NOTHING;
+    o.caseSensitive = true; o.wholeWord = false; o.includeMasterPages = a.masters !== false; o.includeHiddenLayers = true;
+    o.includeLockedLayersForFind = true; o.includeLockedStoriesForFind = true; o.includeFootnotes = true;
+    for (k in map) {
+      if (!map.hasOwnProperty(k)) continue;
+      app.findTextPreferences.findWhat = k;
+      var res = scope.findText(), v = map[k] === null || map[k] === undefined ? '' : String(map[k]);
+      for (j = res.length - 1; j >= 0; j--) res[j].contents = v;   // contents, not changeTo: no ^ escaping, no length limit
+      counts[k] = res.length; total += res.length;
+    }
+    app.findTextPreferences = NothingEnum.NOTHING;
+    var left = [], parts = tok.split('%s');
+    if (parts.length === 2 && parts[0]) {
+      app.findGrepPreferences = NothingEnum.NOTHING; app.findChangeGrepOptions.includeMasterPages = a.masters !== false;
+      app.findGrepPreferences.findWhat = escGrep(parts[0]) + '[^\\r]{1,60}?' + escGrep(parts[1]);
+      var lf = scope.findGrep(), seen = {}; app.findGrepPreferences = NothingEnum.NOTHING;
+      for (j = 0; j < lf.length && left.length < 50; j++) { var c = lf[j].contents; if (!seen[c]) { seen[c] = 1; left.push(c); } }
+    }
+    return { total: total, counts: counts, unfilled: left };
+  },
+  grid: function (a) {
+    var files = filesFrom(a, IMG_RE), i;
+    if (!files.length) throw E('not_found', 'No image files to place', 'pass files[] or folder (+pattern)');
+    var pg = page(a.page), pb = pg.bounds, area = a.area ? [iu(a.area[0]), iu(a.area[1]), iu(a.area[2]), iu(a.area[3])] : marginBox(pg);
+    var n = files.length;
+    var cols = a.cols || (a.rows ? Math.ceil(n / a.rows) : Math.max(1, Math.round(Math.sqrt(n * area[2] / area[3] / (a.ratio || 1.5)))));
+    var rows = a.rows || Math.ceil(n / cols);
+    var g = iu(isNum(a.gutter) ? a.gutter : 5), ch = a.captions ? iu(a.caption_h || 6) : 0;
+    var cw = (area[2] - (cols - 1) * g) / cols, cellH = (area[3] - (rows - 1) * g) / rows, ih = cellH - ch;
+    if (cw <= 0 || ih <= 0) throw E('bad_args', 'Grid cells too small: ' + ou(cw) + ' x ' + ou(ih), 'fewer rows/cols, smaller gutter or larger area');
+    var lay = a.layer ? layer(a.layer, true) : undefined, ids = [], caps = [], fo = FitOptions[FIT[a.fit || 'fill'] || a.fit];
+    for (i = 0; i < n && i < rows * cols; i++) {
+      var r = Math.floor(i / cols), c = i % cols, x0 = pb[1] + area[0] + c * (cw + g), y0 = pb[0] + area[1] + r * (cellH + g);
+      var rc = pg.rectangles.add(lay); CREATED.push(rc);
+      rc.geometricBounds = [y0, x0, y0 + ih, x0 + cw];
+      rc.strokeWeight = 0;
+      rc.place(files[i], false);
+      if (fo) rc.fit(fo);
+      if (a.props) setProps(rc, a.props, 'object');
+      ids.push(rc.id);
+      if (a.captions) {
+        var tf = pg.textFrames.add(lay); CREATED.push(tf);
+        tf.geometricBounds = [y0 + ih + iu(1), x0, y0 + cellH, x0 + cw];
+        tf.contents = a.captions instanceof Array ? String(a.captions[i] || '') : fname(files[i]).replace(/\.[^.]+$/, '');
+        if (a.caption_style) tf.parentStory.texts[0].appliedParagraphStyle = styleByKind('paragraph', a.caption_style);
+        caps.push(tf.id);
+      }
+    }
+    var o = { ids: ids, rows: rows, cols: cols, cell: [ou(cw), ou(ih)] };
+    if (caps.length) o.captions = caps;
+    if (n > rows * cols) o.skipped = n - rows * cols;
+    return o;
+  },
+  thread: function (a) {
+    var fr = items(a.ids), i;
+    for (i = 0; i < fr.length; i++) if (ctor(fr[i]) !== 'TextFrame') throw E('bad_target', 'thread needs text frames; ' + fr[i].id + ' is ' + ctor(fr[i]));
+    for (i = 0; i < fr.length - 1; i++) fr[i].nextTextFrame = fr[i + 1];
+    return { story: fr[0].parentStory.id, frames: fr.length, overset: fr[0].parentStory.overflows };
+  },
+  flow: function (a) {
+    // Add pages + threaded frames (margin area, page's columns) until the story fits.
+    var s = story(a.id), max = a.max_pages || 50, added = 0, frames = [], tc = s.textContainers, last = tc[tc.length - 1];
+    s.recompose();
+    while (s.overflows && added < max) {
+      var lp = null; try { lp = last.parentPage; } catch (e) {}
+      var np = D.pages.add(LocationOptions.AFTER, lp || D.pages[-1]); added++; CREATED.push(np);
+      if (a.master !== undefined) np.appliedMaster = master(a.master);
+      var mb = marginBox(np), b = np.bounds, tf = np.textFrames.add();
+      tf.geometricBounds = [b[0] + mb[1], b[1] + mb[0], b[0] + mb[1] + mb[3], b[1] + mb[0] + mb[2]];
+      try { tf.itemLayer = last.itemLayer; } catch (e1) {}
+      try { tf.textFramePreferences.textColumnCount = np.marginPreferences.columnCount; tf.textFramePreferences.textColumnGutter = np.marginPreferences.columnGutter; } catch (e2) {}
+      last.nextTextFrame = tf; last = tf; frames.push(tf.id);
+      s.recompose();
+    }
+    return { pages_added: added, frames: frames, overset: s.overflows, total_pages: D.pages.length };
+  },
+  align: function (a) {
+    var its = items(a.ids || a.id), i, ref, rk = a.ref || (its.length === 1 ? 'margins' : 'selection');
+    if (rk === 'page' || rk === 'margins') {
+      var pg = null; try { pg = its[0].parentPage; } catch (e) {}
+      pg = pg || page(null);
+      var b = pg.bounds; ref = b;
+      if (rk === 'margins') { var m = marginBox(pg); ref = [b[0] + m[1], b[1] + m[0], b[0] + m[1] + m[3], b[1] + m[0] + m[2]]; }
+    } else if (rk === 'selection') {
+      ref = its[0].geometricBounds.slice(0);
+      for (i = 1; i < its.length; i++) { var q1 = its[i].geometricBounds; ref = [Math.min(ref[0], q1[0]), Math.min(ref[1], q1[1]), Math.max(ref[2], q1[2]), Math.max(ref[3], q1[3])]; }
+    } else ref = item(rk).geometricBounds;
+    var to = a.to instanceof Array ? a.to : (a.to === 'center' ? ['hcenter', 'vcenter'] : [a.to || 'left']);
+    for (i = 0; i < its.length; i++) {
+      var gb = its[i].geometricBounds, dx = 0, dy = 0;
+      for (var t = 0; t < to.length; t++) {
+        var w = to[t];
+        if (w === 'left') dx = ref[1] - gb[1]; else if (w === 'right') dx = ref[3] - gb[3]; else if (w === 'hcenter') dx = (ref[1] + ref[3] - gb[1] - gb[3]) / 2;
+        else if (w === 'top') dy = ref[0] - gb[0]; else if (w === 'bottom') dy = ref[2] - gb[2]; else if (w === 'vcenter') dy = (ref[0] + ref[2] - gb[0] - gb[2]) / 2;
+        else throw E('bad_args', 'to must be left|right|hcenter|top|bottom|vcenter|center');
+      }
+      moveBy(its[i], dx, dy);
+    }
+    return { aligned: its.length, ref: rk };
+  },
+  distribute: function (a) {
+    var its = items(a.ids), h = (a.axis || 'h') === 'h', s0 = h ? 1 : 0, e0 = h ? 3 : 2, i, gap;
+    if (its.length < 2) throw E('bad_args', 'distribute needs 2+ ids');
+    its.sort(function (x, y) { return x.geometricBounds[s0] - y.geometricBounds[s0]; });
+    var gbs = []; for (i = 0; i < its.length; i++) gbs.push(its[i].geometricBounds);
+    if (isNum(a.gap)) gap = iu(a.gap);
+    else { var sum = 0; for (i = 0; i < gbs.length; i++) sum += gbs[i][e0] - gbs[i][s0]; gap = (gbs[gbs.length - 1][e0] - gbs[0][s0] - sum) / (its.length - 1); }
+    var pos = gbs[0][e0];
+    for (i = 1; i < its.length; i++) { var d = pos + gap - gbs[i][s0]; moveBy(its[i], h ? d : 0, h ? 0 : d); pos = gbs[i][e0] + d; }
+    return { distributed: its.length, gap: ou(gap) };
   },
   select: function (a) { var its = a.ids && a.ids.length ? items(a.ids) : []; if (its.length) { app.select(its); } else app.select(NothingEnum.NOTHING); return { selected: its.length }; },
   document: function (a) {
@@ -683,6 +862,9 @@ function precheck(op, a) {
   function it(id) { if (!PENDING['item:' + id]) item(id); }
   function st(kind, n) { if (!PENDING[kind + ':' + n]) styleByKind(kind, n); }
   if (a.id !== undefined && op !== 'pages' && op !== 'layer' && op !== 'style' && op !== 'relink') it(a.id);
+  if (a.csv && !File(a.csv).exists) throw E('not_found', 'CSV not found: ' + a.csv);
+  if (a.folder && !Folder(a.folder).exists) throw E('not_found', 'Folder not found: ' + a.folder);
+  if (op === 'flow') PENDING.pages += a.max_pages || 50;
   if (a.ids) for (var i = 0; i < a.ids.length; i++) it(a.ids[i]);
   if (a.into !== undefined) it(a.into);
   if (a.para_style) st('paragraph', a.para_style);
@@ -697,6 +879,7 @@ function precheck(op, a) {
 
 function apply(a) {
   var ops = a.ops || [], res = [], i;
+  CREATED = []; PENDING = { pages: 0 };
   if (!(ops instanceof Array) || !ops.length) throw E('bad_args', 'ops must be a non-empty array');
   for (i = 0; i < ops.length; i++) {
     var o = ops[i]; if (!OPS[o.op]) throw E('bad_args', 'ops[' + i + ']: unknown op "' + o.op + '"', 'ops: ' + keys(OPS).join('|'));
@@ -706,7 +889,7 @@ function apply(a) {
     try { var r = OPS[ops[i].op](ops[i]); r.op = ops[i].op; res.push(r); }
     catch (e2) {
       var keep = !!a.keep_partial; if (!keep) cleanupCreated();
-      var err = E(e2.code || 'op_failed', 'ops[' + i + '] ' + ops[i].op + ': ' + e2.message, e2.next || 'fix this op and resend the batch');
+      var err = E(e2.code || 'op_failed', 'ops[' + i + '] ' + ops[i].op + ': ' + e2.message + (!e2.code && e2.line ? ' (runtime line ' + e2.line + ')' : ''), e2.next || 'fix this op and resend the batch');
       err.op = i; err.done = res; err.rolled_back = keep ? 'none' : 'created items removed; edits from ops[0..' + (i - 1) + '] stay (undo with indesign_document action=undo if needed)';
       if (i === 0) err.rolled_back = 'nothing changed';
       throw err;
@@ -727,10 +910,17 @@ function exportFile(a) {
   if (fmt === 'pdf') {
     var preset = a.preset ? app.pdfExportPresets.itemByName(a.preset) : null;
     if (a.preset && !valid(preset)) { var names = []; for (i = 0; i < app.pdfExportPresets.length; i++) names.push(app.pdfExportPresets[i].name); throw E('not_found', 'PDF preset not found: ' + a.preset, 'presets: ' + names.join(', ')); }
-    var pp = app.pdfExportPreferences;
-    pp.pageRange = abs || PageRange.ALL_PAGES;
-    if (a.spreads !== undefined) pp.exportReaderSpreads = !!a.spreads;
-    if (preset) D.exportFile(ExportFormat.PDF_TYPE, f, false, preset); else D.exportFile(ExportFormat.PDF_TYPE, f, false);
+    var pp = app.pdfExportPreferences, saved = pp.properties, k;
+    try {
+      // Preset settings are copied into the export prefs so per-export overrides apply on top; user prefs are restored after.
+      if (preset) { var pr0 = preset.properties; for (k in pr0) { if (k === 'name' || k === 'parent' || k === 'id' || k === 'index') continue; try { pp[k] = pr0[k]; } catch (e0) {} } }
+      pp.pageRange = abs || PageRange.ALL_PAGES;
+      if (a.spreads !== undefined) pp.exportReaderSpreads = !!a.spreads;
+      if (a.crop_marks !== undefined) pp.cropMarks = !!a.crop_marks;
+      if (a.bleed !== undefined) pp.useDocumentBleedWithPDF = !!a.bleed;
+      if (a.props) setProps(pp, a.props);
+      D.exportFile(ExportFormat.PDF_TYPE, f, false);
+    } finally { for (k in saved) { try { pp[k] = saved[k]; } catch (e1) {} } }
   } else if (fmt === 'png' || fmt === 'jpg' || fmt === 'jpeg') {
     var png = fmt === 'png', ep = png ? app.pngExportPreferences : app.jpegExportPreferences;
     if (png) { ep.pngExportRange = abs ? PNGExportRangeEnum.EXPORT_RANGE : PNGExportRangeEnum.EXPORT_ALL; ep.transparentBackground = !!a.transparent; }
@@ -778,6 +968,7 @@ function documentAction(a) {
       D = d; return docInfo(d);
     }
   }
+  if (act === 'batch') return batch(a);
   D = doc(a.doc);
   switch (act) {
     case 'info': return docInfo(D);
@@ -805,11 +996,43 @@ function documentAction(a) {
       return { page: pageNo(w.activePage), zoom: w.zoomPercentage };
     }
   }
-  throw E('bad_args', 'Unknown action ' + act, 'new|open|info|activate|save|save_copy|close|export|package|undo|redo|preflight|zoom');
+  throw E('bad_args', 'Unknown action ' + act, 'new|open|info|activate|save|save_copy|close|export|package|batch|undo|redo|preflight|zoom');
+}
+
+function batch(a) {
+  // Open each .indd (no window), run fill/ops, preflight, export, optionally save, close. Already-open docs are reused and left open.
+  var files = filesFrom(a, /\.indd$/i), out = [], ok = 0, i, k;
+  if (!files.length) throw E('not_found', 'No .indd files', 'pass files[] or folder (+pattern, recursive)');
+  if (a.export && a.export.dir && !Folder(a.export.dir).exists) Folder(a.export.dir).create();
+  for (i = 0; i < files.length; i++) {
+    var f = files[i], r = { file: f.fsName }, d = null, opened = false;
+    for (var j = 0; j < app.documents.length; j++) { try { if (app.documents[j].fullName.fsName === f.fsName) d = app.documents[j]; } catch (e) {} }
+    try {
+      if (!d) { d = app.open(f, false); if (d instanceof Array) d = d[0]; opened = true; }
+      D = d;
+      if (a.fill) r.filled = OPS.fill(a.fill).total;
+      if (a.ops) r.ops = apply({ ops: a.ops, keep_partial: a.keep_partial }).results.length;
+      if (a.preflight) { var is = issues(d, 20); r.issues = { overset: is.overset.length, links: is.links.length, fonts: is.fonts.length }; }
+      if (a.export) {
+        var ex = {}; for (k in a.export) ex[k] = a.export[k];
+        var fmt = lower(ex.format || 'pdf');
+        ex.path = (ex.dir || f.parent.fsName) + '/' + fname(f).replace(/\.indd$/i, '') + (ex.suffix || '') + '.' + (fmt === 'jpeg' ? 'jpg' : fmt);
+        r.export = exportFile(ex).path;
+      }
+      if (a.save && d.modified) {
+        if (d.converted) throw E('converted', 'Saved by an older InDesign; not overwriting', 'open it and save with a new path');
+        d.save(); r.saved = true;
+      }
+      r.ok = true; ok++;
+    } catch (e2) { r.ok = false; r.error = String(e2.message || e2); }
+    finally { if (opened && d && d.isValid) { try { d.close(SaveOptions.NO); } catch (e3) {} } }
+    out.push(r);
+  }
+  return { files: files.length, ok: ok, failed: files.length - ok, results: out };
 }
 
 function status() {
-  var o = { app: app.name, version: app.version, docs: [] }, i;
+  var o = { app: app.name, version: app.version, runtime: '%VERSION%', docs: [] }, i;
   for (i = 0; i < app.documents.length; i++) o.docs.push(docInfo(app.documents[i], true));
   if (app.documents.length) {
     var d = app.activeDocument; o.active = d.name;
@@ -884,4 +1107,4 @@ try {
   try { sp.measurementUnit = oldMU; } catch (e3) {}
 }
 return out;
-})();
+} };

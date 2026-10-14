@@ -6,7 +6,10 @@ INSTRUCTIONS = (
     "ONE indesign_apply call holding all ops (pre-validated; created items are removed if an op fails). Address items by "
     "numeric id (from reads) or by their name/label. Props take InDesign DOM names (fillColor, pointSize, "
     "justification:'CENTER_ALIGN', textFramePreferences:{...}); swatch/style/layer values are names. Every error has "
-    "error.next: follow it, don't loop. indesign_script runs raw ExtendScript (ES3, InDesign CS6+ DOM) for anything else."
+    "error.next: follow it, don't loop. Text sizes and DOM props are points. Shortcuts: fill (placeholders like {{Projekt}}), "
+    "grid (image boards), flow (fix overset by adding pages), align/distribute, table csv=, relink folder= (moved project "
+    "folders); indesign_document action=batch processes many .indd files (fill/ops/preflight/export). Use read what=pages "
+    "margin_box to place inside the live area. indesign_script runs raw ExtendScript (ES3, CS6+ DOM) for anything else."
 )
 
 _doc = {"type": ["string", "integer"], "description": "Document name, path or 1-based index; default active"}
@@ -26,7 +29,7 @@ TOOLS = [
         "name": "indesign_read",
         "title": "Read InDesign document",
         "description": (
-            "Query a document. what: document (summary+issues) | pages | items (filter page/type/layer/name/text, nested) | "
+            "Query a document. what: document (summary+issues) | pages (size, master, margin_box[x,y,w,h], columns) | items (filter page/type/layer/name/text, nested) | "
             "item (id; props=true or [names] for raw DOM props) | text (no id: stories list; id: paragraphs w/ styles, raw=true for plain text) | "
             "find (find, grep, case, whole_word, find_props, id=story scope) | styles (kind, detail) | swatches | layers | "
             "links (status filter e.g. missing) | fonts | selection | tables (id: cell contents) | masters | presets | issues. "
@@ -64,13 +67,20 @@ TOOLS = [
             "pages action=add(count,after,master)|delete(pages)|master(pages,master)|move(pages,to,before)|duplicate(pages)|set(pages,margins,props)\n"
             "layer name,rename?,props?,active?,delete? | style kind,name,based_on?,props (create/update) | swatch name,space=cmyk|rgb|lab,values,spot?\n"
             "table id(text frame)|page,x,y,w,h rows,cols,data[[...]],header_rows,style,props,cell_props | cells id,row,col,data,cell_props,range[r1,c1,r2,c2]\n"
-            "relink link(name|id),file | relink (no file: update out-of-date) | select ids | document w,h,facing,bleed,props\n"
+            "  table csv=path (auto ; , tab; UTF-8 or ANSI) instead of data\n"
+            "fill data{Key:value} (token '{{%s}}') | map{'literal':value}; id?(story) masters? -> counts + unfilled placeholders left\n"
+            "grid files[]|folder(+pattern regex,recursive) page; rows?,cols?,gutter=5,area[x,y,w,h]?(default margins),fit=fill,captions(true|[..]),caption_style,layer,props\n"
+            "thread ids (link text frames in order) | flow id (add pages+frames in margins until no overset; max_pages, master)\n"
+            "align ids|id to=left|right|hcenter|top|bottom|vcenter|center|[..] ref=selection|page|margins|<id> | distribute ids axis=h|v gap?\n"
+            "relink link(name|id),file | relink folder (recursive; fixes missing links by file name; all=true relinks every match) | relink (update out-of-date)\n"
+            "select ids | document w,h,facing,bleed,props\n"
             "props use InDesign DOM names; aliases: fill stroke weight font size color para_style char_style object_style layer opacity align(left|center|right|justify)."
         ),
         "inputSchema": {"type": "object", "required": ["ops"], "properties": {
             "ops": {"type": "array", "items": {"type": "object", "required": ["op"], "properties": {"op": {"type": "string", "enum": [
-                "create", "place", "set", "text", "replace", "delete", "duplicate", "group", "ungroup", "arrange", "fit", "pages",
-                "layer", "style", "swatch", "table", "cells", "relink", "select", "document"]}}}},
+                "create", "place", "set", "text", "replace", "fill", "delete", "duplicate", "group", "ungroup", "arrange", "align",
+                "distribute", "fit", "grid", "thread", "flow", "pages", "layer", "style", "swatch", "table", "cells", "relink",
+                "select", "document"]}}}},
             "doc": _doc, "units": _units, "label": {"type": "string", "description": "undo step name"},
             "keep_partial": {"type": "boolean", "description": "don't remove created items when an op fails"},
         }},
@@ -82,18 +92,23 @@ TOOLS = [
         "description": (
             "action: new (w,h,pages,facing,margins,columns,gutter,bleed,preset,path?) | open path | info | activate | save (path?) | "
             "save_copy path | close save=true|false (required if modified) | export format=pdf|png|jpg|idml|eps|rtf|txt path "
-            "pages('1-3'|[1,4]) preset(pdf) resolution spreads bleed id(png/jpg single item, rtf/txt story) | "
-            "package path fonts links pdf idml report | undo|redo steps | preflight | zoom page id fit=page|spread|actual percent."
+            "pages('1-3'|[1,4]) preset(pdf) crop_marks bleed props(pdfExportPreferences overrides) resolution spreads id(png/jpg single item, rtf/txt story) | "
+            "package path fonts links pdf idml report | batch files[]|folder(+pattern,recursive) fill{data|map} ops[] preflight "
+            "export{format,preset,dir,suffix,pages,...} save -> per-file results (opens hidden, closes after; up to 30 min) | "
+            "undo|redo steps | preflight | zoom page id fit=page|spread|actual percent."
         ),
         "inputSchema": {"type": "object", "required": ["action"], "properties": {
             "action": {"type": "string", "enum": ["new", "open", "info", "activate", "save", "save_copy", "close", "export", "package",
-                                                  "undo", "redo", "preflight", "zoom"]},
+                                                  "batch", "undo", "redo", "preflight", "zoom"]},
+            "files": {"type": "array", "items": {"type": "string"}}, "folder": {"type": "string"}, "pattern": {"type": "string"},
+            "recursive": {"type": "boolean"}, "fill": {"type": "object"}, "ops": {"type": "array", "items": {"type": "object"}},
+            "export": {"type": "object"}, "crop_marks": {"type": "boolean"}, "props": {"type": "object"},
             "doc": _doc, "path": {"type": "string"}, "format": {"type": "string"}, "preset": {"type": "string"},
             "pages": {"type": ["integer", "string", "array"]}, "page": _page, "id": _id,
             "w": {"type": "number"}, "h": {"type": "number"}, "facing": {"type": "boolean"},
             "margins": {"type": ["number", "array"], "description": "n or [top,right,bottom,left]"},
-            "columns": {"type": "integer"}, "gutter": {"type": "number"}, "bleed": {"type": "number"},
-            "save": {"type": "boolean"}, "resolution": {"type": "number"}, "spreads": {"type": "boolean"},
+            "columns": {"type": "integer"}, "gutter": {"type": "number"}, "bleed": {"type": ["number", "boolean"], "description": "new: mm; export: include bleed"},
+            "preflight": {"type": "boolean"}, "save": {"type": "boolean"}, "resolution": {"type": "number"}, "spreads": {"type": "boolean"},
             "quality": {"type": "string"}, "transparent": {"type": "boolean"}, "overwrite": {"type": "boolean"},
             "fonts": {"type": "boolean"}, "links": {"type": "boolean"}, "pdf": {"type": "boolean"}, "idml": {"type": "boolean"},
             "report": {"type": "boolean"}, "steps": {"type": "integer"}, "window": {"type": "boolean"},

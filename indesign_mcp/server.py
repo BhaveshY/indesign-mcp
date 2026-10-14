@@ -1,5 +1,6 @@
 """InDesign MCP server: stdio JSON-RPC, stdlib only, talks to InDesign over COM (DoScript)."""
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -12,14 +13,20 @@ import uuid
 from . import com
 from .tools import TOOLS, INSTRUCTIONS
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 PROGIDS = [p for p in os.environ.get("INDESIGN_PROGID", "").split(";") if p] + [
     "InDesign.Application.2026", "InDesign.Application.2025", "InDesign.Application.2024", "InDesign.Application.2023",
     "InDesign.Application.CS6", "InDesign.Application"]
 JS_LANG = 1246973031          # ScriptLanguage.JAVASCRIPT
 UNDO_ENTIRE = 1699963733      # UndoModes.ENTIRE_SCRIPT
 TIMEOUT = float(os.environ.get("INDESIGN_MCP_TIMEOUT", "180"))
-RUNTIME = open(os.path.join(os.path.dirname(__file__), "runtime.jsx"), encoding="utf-8").read()
+BATCH_TIMEOUT = float(os.environ.get("INDESIGN_MCP_BATCH_TIMEOUT", "1800"))
+_SRC = open(os.path.join(os.path.dirname(__file__), "runtime.jsx"), encoding="utf-8").read()
+RUNTIME_VERSION = hashlib.sha1(_SRC.encode("utf-8")).hexdigest()[:12]
+RUNTIME = _SRC.replace("%VERSION%", RUNTIME_VERSION)
+# The runtime lives in a persistent ExtendScript engine: it is parsed once, then each call is a ~1 ms stub.
+ENGINE = '#targetengine "indesign_mcp"\n'
+RELOAD = "__idmcp_reload__"
 PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 
@@ -112,14 +119,19 @@ class Bridge:
                                     "Close any dialog in InDesign, then retry once.")
                 raise ToolError("indesign_error", str(e), "Check the arguments; InDesign rejected the script.")
 
-    def execute(self, tool, args, undo_name=None, launch=False):
-        js = "var __A = " + json.dumps(args, ensure_ascii=True) + ", __T = " + json.dumps(tool) + ";\n" + RUNTIME
+    def execute(self, tool, args, undo_name=None, launch=False, timeout=TIMEOUT):
+        call = "(" + json.dumps(args, ensure_ascii=True) + ", " + json.dumps(tool) + ")"
+        stub = (ENGINE + "(function(){var m=$.global.__idmcp;if(!m||m.v!==" + json.dumps(RUNTIME_VERSION) + ")return "
+                + json.dumps(RELOAD) + ";return m.run" + call + ";})();")
 
         def work():
             if launch:
                 self._connect(launch=True)
-            return self._doscript(js, undo_name)
-        raw = self.run(work)
+            out = self._doscript(stub, undo_name)
+            if out == RELOAD:   # first call, InDesign restarted, or runtime changed: load it once
+                out = self._doscript(ENGINE + RUNTIME + "\n$.global.__idmcp.run" + call + ";", undo_name)
+            return out
+        raw = self.run(work, timeout)
         try:
             res = json.loads(raw)
         except (TypeError, ValueError):
@@ -163,7 +175,8 @@ def call_tool(name, args):
         res["ms"] = int((time.perf_counter() - t0) * 1000)
         return [{"type": "text", "text": _dump(res)}]
     if name == "indesign_document":
-        return [{"type": "text", "text": _dump(b.execute("document", args))}]
+        to = BATCH_TIMEOUT if args.get("action") == "batch" else TIMEOUT
+        return [{"type": "text", "text": _dump(b.execute("document", args, timeout=to))}]
     if name == "indesign_capture":
         path = os.path.join(tempfile.gettempdir(), f"indesign-mcp-{uuid.uuid4().hex}.png")
         a = dict(args, path=path)

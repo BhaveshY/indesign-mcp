@@ -50,6 +50,91 @@ def png(path, w=64, h=40):
         f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
+def check(label, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL'} check {label} {detail}")
+    if not cond:
+        FAILS.append(label)
+
+
+def v11(c, doc, img):
+    """1.1 features: fill, grid, CSV tables, thread/flow, align/distribute, relink folder, PDF overrides, batch."""
+    imgs = os.path.join(TMP, "imgs"); os.makedirs(imgs, exist_ok=True)
+    for i in range(5):
+        png(os.path.join(imgs, f"Ansicht {i + 1}.png"), 48 + i * 8, 32)
+    csv = os.path.join(TMP, "raeume.csv")
+    open(csv, "w", encoding="cp1252", newline="").write('Raum;Fläche m²;Bemerkung\r\nWohnen;"32,5";"mit ""Loggia"""\r\nBad;6,5;\r\n')
+    c.call("indesign_apply", {"doc": doc, "label": "v11 setup", "ops": [
+        {"op": "pages", "action": "add", "count": 1},
+        {"op": "create", "kind": "text", "page": 4, "x": 15, "y": 15, "w": 120, "h": 12, "name": "Head",
+         "text": "{{Projekt}} – Stand {{Datum}} {{Bauherr}}"},
+        {"op": "grid", "page": 4, "folder": imgs, "area": [15, 40, 180, 90], "gutter": 4, "captions": True},
+        {"op": "table", "page": 4, "x": 15, "y": 140, "w": 180, "h": 30, "csv": csv, "header_rows": 1},
+        {"op": "create", "kind": "rect", "page": 4, "x": 20, "y": 200, "w": 20, "h": 10, "name": "A1"},
+        {"op": "create", "kind": "rect", "page": 4, "x": 70, "y": 215, "w": 30, "h": 15, "name": "A2"},
+        {"op": "create", "kind": "rect", "page": 4, "x": 150, "y": 205, "w": 10, "h": 20, "name": "A3"},
+    ]})
+    r, _ = c.call("indesign_apply", {"doc": doc, "ops": [
+        {"op": "fill", "data": {"Projekt": "Wohnquartier Spreeufer", "Datum": "14.10.2026"}},
+        {"op": "align", "ids": ["A1", "A2", "A3"], "to": "top"},
+        {"op": "distribute", "ids": ["A1", "A2", "A3"], "axis": "h", "gap": 10},
+    ]})
+    f = r["results"][0]
+    check("fill counts", f["total"] == 2 and f["unfilled"] == ["{{Bauherr}}"], json.dumps(f, ensure_ascii=False))
+    its, _ = c.call("indesign_read", {"doc": doc, "what": "items", "ids": ["A1", "A2", "A3"]})
+    b = {x["name"]: x for x in its["items"]}
+    check("align top", b["A1"]["y"] == b["A2"]["y"] == b["A3"]["y"] == 200)
+    check("distribute gap", abs(b["A2"]["x"] - (b["A1"]["x"] + 20 + 10)) < 0.05 and abs(b["A3"]["x"] - (b["A2"]["x"] + 30 + 10)) < 0.05,
+          str([(b[k]["x"]) for k in ("A1", "A2", "A3")]))
+    grid, _ = c.call("indesign_read", {"doc": doc, "what": "items", "page": 4, "type": "Rectangle"})
+    check("grid placed 5 images", sum(1 for x in grid["items"] if x.get("link", "").startswith("Ansicht")) == 5)
+    tabs, _ = c.call("indesign_read", {"doc": doc, "what": "tables"})
+    t = c.call("indesign_read", {"doc": doc, "what": "tables", "id": tabs["items"][-1]["table"]})[0]
+    check("csv table (cp1252, quotes)", t["rows"][0][1] == "Fläche m²" and t["rows"][1][2][5:11] == "Loggia" and t["rows"][1][1] == "32,5", json.dumps(t["rows"], ensure_ascii=False))
+    pages, _ = c.call("indesign_read", {"doc": doc, "what": "pages", "page": 4})
+    mb = pages["items"][0].get("margin_box") or [0, 0, 999, 0]
+    check("pages margin_box", abs(mb[0] * 2 + mb[2] - 210) < 0.05, str(mb))  # page 4 has no master -> default margins
+
+    # flow: overset story grows the document
+    long = "\r".join(f"Absatz {i}: " + "Baukörper und Freiraum bilden ein Ensemble. " * 6 for i in range(60))
+    r, _ = c.call("indesign_apply", {"doc": doc, "ops": [
+        {"op": "create", "kind": "text", "page": 4, "x": 15, "y": 240, "w": 180, "h": 30, "text": long, "name": "Long"}]})
+    n0 = c.call("indesign_read", {"doc": doc, "what": "document"})[0]["pages"]
+    r, _ = c.call("indesign_apply", {"doc": doc, "ops": [{"op": "flow", "id": "Long"}]})
+    fl = r["results"][0]
+    check("flow resolves overset", fl["overset"] is False and fl["pages_added"] >= 1 and fl["total_pages"] == n0 + fl["pages_added"], json.dumps(fl)[:200])
+
+    # relink folder: move the image so the link goes missing, then repair from another folder
+    moved = os.path.join(TMP, "moved"); os.makedirs(moved, exist_ok=True)
+    c.call("indesign_apply", {"doc": doc, "ops": [{"op": "place", "file": os.path.join(imgs, "Ansicht 1.png"), "page": 4, "x": 0, "y": 0, "w": 10, "h": 10, "name": "Tmp"}]})
+    os.replace(os.path.join(imgs, "Ansicht 5.png"), os.path.join(moved, "Ansicht 5.png"))
+    c.call("indesign_script", {"doc": doc, "code": "for (var i=0;i<D.links.length;i++) try{D.links[i].update()}catch(e){} return D.links.length;"})
+    miss, _ = c.call("indesign_read", {"doc": doc, "what": "links", "status": "missing"})
+    r, _ = c.call("indesign_apply", {"doc": doc, "ops": [{"op": "relink", "folder": moved}]})
+    check("relink folder", miss["total"] >= 1 and r["results"][0]["relinked"] == miss["total"], json.dumps(r["results"][0]))
+
+    # PDF with preset + overrides; user export prefs restored afterwards
+    before = c.call("indesign_script", {"code": "var p=app.pdfExportPreferences; return [p.cropMarks, p.pageRange+''];"})[0]["result"]
+    c.call("indesign_document", {"doc": doc, "action": "export", "format": "pdf", "path": os.path.join(TMP, "print.pdf"),
+                                 "preset": "[PDF/X-4:2008]", "crop_marks": True, "bleed": True, "pages": "4"})
+    after = c.call("indesign_script", {"code": "var p=app.pdfExportPreferences; return [p.cropMarks, p.pageRange+''];"})[0]["result"]
+    check("pdf export prefs restored", before == after and os.path.getsize(os.path.join(TMP, "print.pdf")) > 1000, f"{before} {after}")
+
+    # batch: two saved copies with placeholders -> fill + PDF each
+    bdir = os.path.join(TMP, "batch"); os.makedirs(bdir, exist_ok=True)
+    for name in ("Blatt A.indd", "Blatt B.indd"):
+        c.call("indesign_document", {"doc": doc, "action": "save_copy", "path": os.path.join(bdir, name)})
+    r, _ = c.call("indesign_document", {"action": "batch", "folder": bdir, "fill": {"data": {"Bauherr": "WBM"}},
+                                        "preflight": True, "export": {"format": "pdf", "dir": os.path.join(bdir, "pdf"), "pages": "4"}})
+    check("batch", r["ok"] == 2 and all(x.get("filled") == 1 and os.path.exists(x["export"]) for x in r["results"]), json.dumps(r)[:300])
+
+    # latency of the persistent engine
+    ts = []
+    for _ in range(10):
+        t0 = time.perf_counter(); c.rpc("tools/call", {"name": "indesign_read", "arguments": {"doc": doc, "what": "pages", "limit": 1}}); ts.append((time.perf_counter() - t0) * 1000)
+    ts.sort()
+    print(f"      read latency median {ts[5]:.1f} ms, min {ts[0]:.1f} ms")
+
+
 def main():
     c = Client()
     t = time.perf_counter()
@@ -146,6 +231,8 @@ def main():
         FAILS.append("rollback")
     c.call("indesign_apply", {"doc": doc, "ops": [{"op": "set", "id": 999999, "x": 1}]}, expect_error=True)
     c.call("indesign_apply", {"doc": doc, "ops": [{"op": "set", "id": "Title", "props": {"fill": "No Such Swatch"}}]}, expect_error=True)
+
+    v11(c, doc, img)
 
     for args in ({"doc": doc, "page": 1}, {"doc": doc, "id": "Render"}, {"doc": doc, "page": 2, "max_px": 600}):
         _, raw = c.call("indesign_capture", args)

@@ -1,6 +1,6 @@
 # InDesign MCP
 
-Local MCP server for Adobe InDesign on Windows. It's pure Python (stdlib only, no pip installs) and talks to the running InDesign over COM. Each tool call runs one ExtendScript batch in InDesign, which typically takes about 20 ms.
+Local MCP server for Adobe InDesign on Windows. It's pure Python (stdlib only, no pip installs) and talks to the running InDesign over COM. The InDesign-side runtime is loaded once into a persistent ExtendScript engine. After that, a typical call takes 3–10 ms.
 
 Tested live against InDesign CS6 (8.0). The server also tries the ProgIDs of newer versions (`InDesign.Application.2023`–`2026`), but those versions have not been tested.
 
@@ -10,10 +10,18 @@ Tested live against InDesign CS6 (8.0). The server also tries the ProgIDs of new
 |---|---|
 | `indesign_status` | Connection check, open docs, active doc/page, selection count (`launch=true` starts InDesign) |
 | `indesign_read` | `what=` document · pages · items · item (raw DOM props) · text · find (text/GREP) · styles · swatches · layers · links · fonts · selection · tables · masters · presets · issues. Paginated (`offset`/`limit` → `next_offset`) |
-| `indesign_apply` | One batch of ops: create · place · set · text · replace · delete · duplicate · group · ungroup · arrange · fit · pages · layer · style · swatch · table · cells · relink · select · document. Inputs are checked before anything runs. Items it created are removed if an op fails |
-| `indesign_document` | new · open · info · activate · save · save_copy · close · export (pdf/png/jpg/idml/eps/rtf/txt) · package · undo/redo · preflight · zoom |
+| `indesign_apply` | One batch of ops: create · place · set · text · replace · **fill** · delete · duplicate · group · ungroup · arrange · **align** · **distribute** · fit · **grid** · **thread** · **flow** · pages · layer · style · swatch · table (data or **CSV**) · cells · relink (file, or **folder** search) · select · document. Inputs are checked before anything runs. Items it created are removed if an op fails |
+| `indesign_document` | new · open · info · activate · save · save_copy · close · export (pdf/png/jpg/idml/eps/rtf/txt; PDF preset + crop marks/bleed/overrides) · package · **batch** · undo/redo · preflight · zoom |
 | `indesign_capture` | PNG of a page, a spread or a single item, returned as an image |
 | `indesign_script` | Raw ExtendScript with helpers in scope (`D`, `item`, `page`, `info`, `setProps`) |
+
+### Workflows it covers in one call
+- **Title blocks and templates**: `fill` with `data: {Projekt: "...", Datum: "..."}` replaces every `{{Projekt}}` placeholder, including on masters. It also reports any placeholders that are still unfilled.
+- **Competition boards and portfolios**: `grid` with `folder: "...\Renderings"` lays the images out in rows and columns inside the page margins, with optional captions.
+- **Room or area schedules**: `table` with `csv: "...\Flaechen.csv"` reads Excel CSV exports, including semicolon-separated ANSI files from German Excel.
+- **Long reports**: `flow` adds pages and threaded frames until a story no longer oversets.
+- **Moved project folders**: `relink` with `folder: "..."` repairs missing links by matching file names, searching subfolders too.
+- **Many files at once**: `indesign_document action=batch` takes a `folder` and can fill, run ops, preflight and export each file, for example to PDF. It opens every file hidden, closes it afterwards, and reports results per file.
 
 ### Conventions
 - **Geometry**: `x,y,w,h` are in mm (or set `units`), measured from the top-left of the item's page. Pages are 1-based.
@@ -42,6 +50,8 @@ python scripts\jsxcheck.py   # syntax-check runtime.jsx inside InDesign's Extend
 - `indesign_mcp/tools.py`: tool schemas
 
 ## Notes
+- If a batch takes longer than 30 min (set `INDESIGN_MCP_BATCH_TIMEOUT` to change this), the server returns `timeout`.
+- PDF exports restore your own PDF export preferences afterwards.
 - If InDesign is not running, the server reports `not_running` rather than starting it. To start it, call `indesign_status` with `launch=true`.
 - If a call takes longer than 180 s (set `INDESIGN_MCP_TIMEOUT` to change this), the server returns `timeout`. This usually means a dialog is open in InDesign.
 - Scripted `undo()` is unreliable in CS6, so a failed batch only removes the items it created. Edits made by earlier ops in that batch are reported in `error.done`.

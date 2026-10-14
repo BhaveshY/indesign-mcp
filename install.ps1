@@ -26,7 +26,7 @@ if (-not $NoCodex) {
 command = '$py'
 args = ['$entry']
 startup_timeout_sec = 20.0
-tool_timeout_sec = 300.0
+tool_timeout_sec = 1800.0
 "@
         $pattern = '(?ms)^\[mcp_servers\.indesign\]\r?\n.*?(?=^\[|\z)'
         if ($text -match $pattern) { $text = [regex]::Replace($text, $pattern, ($block + "`r`n`r`n")) }
