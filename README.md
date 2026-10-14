@@ -12,7 +12,7 @@ Tested live against InDesign CS6 (8.0). The server also tries the ProgIDs of new
 | `indesign_read` | `what=` document · pages · items · item (raw DOM props) · text · find (text/GREP) · styles · swatches · layers · links · fonts · selection · tables · masters · presets · issues. Paginated (`offset`/`limit` → `next_offset`) |
 | `indesign_apply` | One batch of ops: create · place · set · text · replace · **fill** · delete · duplicate · group · ungroup · arrange · **align** · **distribute** · fit · **grid** · **thread** · **flow** · pages · layer · style · swatch · table (data or **CSV**) · cells · relink (file, or **folder** search) · select · document. Inputs are checked before anything runs. Items it created are removed if an op fails |
 | `indesign_document` | new · open · info · activate · save · save_copy · close · export (pdf/png/jpg/idml/eps/rtf/txt; PDF preset + crop marks/bleed/overrides) · package · **batch** · undo/redo · preflight · zoom |
-| `indesign_capture` | PNG of a page, a spread or a single item, returned as an image |
+| `indesign_capture` | PNG of a page, a spread or a single item, returned as an image. `overlay=true` labels every frame with its id and draws the margin and column guides. Outline colours: blue = text, magenta = graphic, orange = other, red = overset. To zoom in, pass `region=[x,y,w,h]` for an area of the page or `around=<id>` for the area around one element. Overlay and zoom render from a hidden temporary copy, so the document itself is never changed. |
 | `indesign_script` | Raw ExtendScript with helpers in scope (`D`, `item`, `page`, `info`, `setProps`) |
 
 ### Workflows it covers in one call

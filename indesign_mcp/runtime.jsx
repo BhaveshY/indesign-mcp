@@ -558,7 +558,7 @@ function filesFrom(a, re) {
   if (a.files) for (i = 0; i < a.files.length; i++) { var f = File(a.files[i]); if (!f.exists) throw E('not_found', 'File not found: ' + a.files[i]); out.push(f); }
   if (a.folder) { var fo = Folder(a.folder); if (!fo.exists) throw E('not_found', 'Folder not found: ' + a.folder); walk(fo, 0); }
   function walk(fo, depth) {
-    var l = fo.getFiles(); l.sort(function (x, y) { var p = lower(fname(x)), p2 = lower(fname(y)); return p < p2 ? -1 : p > p2 ? 1 : 0; });
+    var l = fo.getFiles(); l.sort(function (x, y) { var p = lower(fname(x)), p2 = lower(fname(y)); if (p < p2) return -1; return p > p2 ? 1 : 0; });   // no chained ?: (ExtendScript misparses them)
     for (var j = 0; j < l.length; j++) { if (l[j] instanceof Folder) { if (a.recursive && depth < 8) walk(l[j], depth + 1); } else if (rx.test(fname(l[j]))) out.push(l[j]); }
   }
   return out;
@@ -1079,12 +1079,19 @@ function status() {
   return o;
 }
 
+// Export resolution so the long side is ~max_px for a subject `dimPt` points long.
+function capRes(a, dimPt, maxDpi) {
+  var r = Math.floor((a.max_px || 1400) * 72 / Math.max(dimPt, 1));
+  if (a.resolution) r = Math.min(a.resolution, r);
+  return Math.max(10, Math.min(r, maxDpi));
+}
 function capture(a) {
   var tmp = File(a.path);
+  if (a.overlay || a.region || a.around !== undefined) return captureCopy(a, tmp);
   var pg = a.id !== undefined ? null : page(a.page);
   if (a.id !== undefined) {
     var it = item(a.id); var b = it.geometricBounds; var dim = Math.max(b[3] - b[1], b[2] - b[0]);
-    app.pngExportPreferences.exportResolution = res(dim);
+    app.pngExportPreferences.exportResolution = capRes(a, dim, 600);
     app.pngExportPreferences.transparentBackground = false;
     it.exportFile(ExportFormat.PNG_FORMAT, tmp);
     return { path: tmp.fsName, id: it.id, resolution: app.pngExportPreferences.exportResolution };
@@ -1092,15 +1099,114 @@ function capture(a) {
   var pb = pg.bounds, dm = Math.max(pb[3] - pb[1], pb[2] - pb[0]) * (a.spread ? 2 : 1);
   var ep = app.pngExportPreferences;
   ep.pngExportRange = PNGExportRangeEnum.EXPORT_RANGE; ep.pageString = '+' + pageNo(pg);
-  ep.exportingSpread = !!a.spread; ep.transparentBackground = false; ep.exportResolution = res(dm);
+  ep.exportingSpread = !!a.spread; ep.transparentBackground = false; ep.exportResolution = capRes(a, dm, 600);
   try { ep.pngQuality = PNGQualityEnum.HIGH; ep.antiAlias = true; ep.useDocumentBleeds = false; } catch (e) {}
   D.exportFile(ExportFormat.PNG_FORMAT, tmp, false);
   return { path: tmp.fsName, page: pageNo(pg), resolution: ep.exportResolution };
-  function res(dimUnits) {
-    var pt = dimUnits, px = a.max_px || 1400;
-    var r = Math.floor(px * 72 / Math.max(pt, 1)); if (a.resolution) r = Math.min(a.resolution, r);
-    return Math.max(10, Math.min(r, 600));
+}
+
+// Overlay and zoom render from a hidden temporary copy (saveACopy keeps item ids), so the user's document,
+// its undo history and its modified flag are never touched.
+var OV_COLORS = { text: [0, 90, 255], graphic: [225, 0, 150], other: [255, 130, 0], overset: [255, 0, 0], guides: [0, 175, 200] };
+var OV_LEGEND = 'blue=text frame, magenta=graphic frame, orange=other item, red=overset text frame, cyan=margins/column gutters; label = item id [name]';
+function captureCopy(a, tmp) {
+  var pgNo, regionPt = null, target = a.around !== undefined ? item(a.around) : null;
+  if (target) {
+    var tp0 = null; try { tp0 = target.parentPage; } catch (e) {}
+    if (!tp0) throw E('bad_target', 'around: item ' + a.around + ' is not on a page', 'use page + region instead');
+    var vb = target.visibleBounds, tb = tp0.bounds, pad = iu(isNum(a.pad) ? a.pad : 10);
+    pgNo = pageNo(tp0);
+    regionPt = [vb[1] - tb[1] - pad, vb[0] - tb[0] - pad, vb[3] - vb[1] + 2 * pad, vb[2] - vb[0] + 2 * pad];
+  } else {
+    pgNo = pageNo(page(a.page));
+    if (a.region) {
+      if (!(a.region instanceof Array) || a.region.length !== 4) throw E('bad_args', 'region must be [x,y,w,h] (page-relative)');
+      regionPt = [iu(a.region[0]), iu(a.region[1]), iu(a.region[2]), iu(a.region[3])];
+    }
   }
+  if (regionPt && a.spread) throw E('bad_args', 'region/around capture a single page', 'drop spread=true');
+  if (regionPt && (regionPt[2] <= 0 || regionPt[3] <= 0)) throw E('bad_args', 'region w and h must be > 0');
+  var f = File(Folder.temp + '/idmcp-capture-' + new Date().getTime() + '-' + Math.floor(Math.random() * 1e6) + '.indd');
+  D.saveACopy(f);
+  var cd = app.open(f, false), drawn = 0, ep = app.pngExportPreferences;
+  try {
+    var pgc = cd.pages[pgNo - 1], pb = pgc.bounds;
+    var dimPt = regionPt ? Math.max(regionPt[2], regionPt[3]) : Math.max(pb[3] - pb[1], pb[2] - pb[0]) * (a.spread ? 2 : 1);
+    var dpi = capRes(a, dimPt, regionPt ? 2400 : 600);
+    if (a.overlay) {
+      // Labels ~12 px tall in the output unless label_size (pt) is given.
+      var lsz = isNum(a.label_size) ? a.label_size : Math.max(5, Math.min(24, 12 * 72 / dpi));
+      var pgs = a.spread ? pgc.parent.pages.everyItem().getElements() : [pgc];   // CS6 Page has no parentSpread
+      for (var i = 0; i < pgs.length; i++) drawn += drawOverlay(cd, pgs[i], a, lsz);
+    }
+    if (regionPt) {
+      var tl = pgc.resolve(AnchorPoint.TOP_LEFT_ANCHOR, CoordinateSpaces.SPREAD_COORDINATES)[0];
+      pgc.reframe(CoordinateSpaces.SPREAD_COORDINATES, [[tl[0] + regionPt[0], tl[1] + regionPt[1]], [tl[0] + regionPt[0] + regionPt[2], tl[1] + regionPt[1] + regionPt[3]]]);
+    }
+    ep.pngExportRange = PNGExportRangeEnum.EXPORT_RANGE; ep.pageString = '+' + pgNo;
+    ep.exportingSpread = !!a.spread; ep.transparentBackground = false;
+    ep.exportResolution = dpi;
+    try { ep.pngQuality = PNGQualityEnum.HIGH; ep.antiAlias = true; ep.useDocumentBleeds = false; } catch (e1) {}
+    cd.exportFile(ExportFormat.PNG_FORMAT, tmp, false);
+    if (a.debug) { var dbg = []; for (var q9 = 0; q9 < cd.colors.length; q9++) { var cc = cd.colors[q9]; if (/^__mcp/.test(cc.name)) dbg.push([cc.name, enumName('ColorSpace', cc.space), cc.colorValue]); } a.__dbg = dbg; }
+  } finally {
+    try { cd.close(SaveOptions.NO); } catch (e2) {}
+    try { f.remove(); } catch (e3) {}
+  }
+  var o = { path: tmp.fsName, page: pgNo, resolution: ep.exportResolution };
+  if (regionPt) o.region = [ou(regionPt[0]), ou(regionPt[1]), ou(regionPt[2]), ou(regionPt[3])];
+  if (a.overlay) { o.labels = drawn; o.legend = OV_LEGEND; }
+  if (a.__dbg) o.debug = a.__dbg;
+  return o;
+}
+function drawOverlay(cd, pg, a, size) {
+  var L = cd.layers.itemByName('__mcp_overlay__');
+  if (!valid(L)) { L = cd.layers.add({ name: '__mcp_overlay__' }); L.move(LocationOptions.AT_BEGINNING); }
+  L.visible = true; L.locked = false; L.printable = true;
+  var none = cd.swatches.itemByName('None'), paper = cd.swatches.itemByName('Paper'), n = 0;
+  function col(key) {
+    var nmc = '__mcp_' + key, c = cd.colors.itemByName(nmc);
+    if (!valid(c)) c = cd.colors.add({ name: nmc, model: ColorModel.PROCESS, space: ColorSpace.RGB, colorValue: OV_COLORS[key] });
+    return c;
+  }
+  function outline(b, c, w) {
+    var r = pg.rectangles.add(L); r.geometricBounds = b; r.fillColor = none; r.strokeColor = c; r.strokeWeight = w;
+    try { r.strokeAlignment = StrokeAlignment.INSIDE_ALIGNMENT; r.textWrapPreferences.textWrapMode = TextWrapModes.NONE; } catch (e) {}
+    return r;
+  }
+  if (a.guides !== false) {
+    var pb = pg.bounds, m = marginBox(pg), gc = col('guides'), mx = pb[1] + m[0], my = pb[0] + m[1];
+    outline([my, mx, my + m[3], mx + m[2]], gc, 0.5);
+    var cols = pg.marginPreferences.columnCount, g = pg.marginPreferences.columnGutter;
+    if (cols > 1) { var cw = (m[2] - (cols - 1) * g) / cols; for (var k = 1; k < cols; k++) { var gx = mx + k * cw + (k - 1) * g; outline([my, gx, my + m[3], gx + g], gc, 0.25); } }
+  }
+  var src = a.nested ? pg.allPageItems : pg.pageItems.everyItem().getElements();
+  for (var i = 0; i < src.length; i++) {
+    var it = src[i], t = ctor(it);
+    if (GRAPHIC[t]) continue;
+    try { if (it.itemLayer.id === L.id || !it.itemLayer.visible || !it.visible) continue; } catch (e1) { continue; }
+    var over = false, hasG = false;
+    try { over = t === 'TextFrame' && it.overflows; } catch (e2) {}
+    try { hasG = !!(it.graphics && it.graphics.length); } catch (e3) {}
+    var key = 'other';   // if/else, not chained ?: (ExtendScript misparses them)
+    if (over) key = 'overset'; else if (t === 'TextFrame') key = 'text'; else if (hasG) key = 'graphic';
+    var c = col(key), vb = it.visibleBounds;
+    outline(vb, c, over ? 1.5 : 0.75);
+    var lbl = String(it.id); try { if (it.name) lbl += ' ' + it.name; } catch (e4) {}
+    if (over) lbl += ' OVERSET';
+    var tf = pg.textFrames.add(L);
+    // Label sits just above the frame so it doesn't hide content; inside the top edge when that would leave the page.
+    var lh = size * 1.15 + 1, ly = vb[0] - lh >= pg.bounds[0] ? vb[0] - lh : vb[0];
+    tf.geometricBounds = [ly, vb[1], ly + size * 2, vb[1] + size * 25];
+    tf.contents = lbl; tf.fillColor = c;
+    var tx = tf.texts[0]; tx.pointSize = size; tx.leading = size * 1.15; tx.fillColor = paper;
+    try { tx.appliedFont = 'Arial\tBold'; } catch (e5) {}
+    var tp = tf.textFramePreferences; tp.insetSpacing = [0.5, 1.5, 0.5, 1.5];
+    try { tp.ignoreWrap = true; tf.textWrapPreferences.textWrapMode = TextWrapModes.NONE; } catch (e6) {}
+    try { tp.autoSizingReferencePoint = AutoSizingReferenceEnum.TOP_LEFT_POINT; tp.useNoLineBreaksForAutoSizing = true; tp.autoSizingType = AutoSizingTypeEnum.HEIGHT_AND_WIDTH; } catch (e7) {}
+    n++;
+  }
+  return n;
 }
 
 function script(a) {

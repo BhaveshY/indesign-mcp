@@ -153,6 +153,19 @@ def v12(c, doc):
     c.call("indesign_apply", {"doc": doc, "ops": [{"op": "delete", "id": "Quotes"}]})
 
 
+def v13(c, doc):
+    """Debug overlay + zoom: images come back, labels are drawn, and the document is not modified."""
+    before, _ = c.call("indesign_read", {"doc": doc, "what": "document"})
+    for args, want in (({"page": 1, "overlay": True}, "labels"), ({"page": 1, "region": [10, 10, 100, 50]}, "region"),
+                       ({"around": "Title", "overlay": True, "pad": 5}, "labels"), ({"page": 1, "overlay": True, "spread": True}, "labels")):
+        r, raw = c.call("indesign_capture", dict(args, doc=doc))
+        img = next((x for x in raw["content"] if x["type"] == "image"), None)
+        check(f"capture {list(args)}", img is not None and len(img["data"]) > 1000 and want in r and r.get("labels", 1) > 0, json.dumps(r)[:160])
+    after, _ = c.call("indesign_read", {"doc": doc, "what": "document"})
+    check("overlay leaves doc untouched", before["counts"] == after["counts"] and before["layers"] == after["layers"])
+    c.call("indesign_capture", {"doc": doc, "page": 1, "region": [0, 0, 10, -5]}, expect_error=True)
+
+
 def main():
     c = Client()
     t = time.perf_counter()
@@ -252,6 +265,7 @@ def main():
 
     v11(c, doc, img)
     v12(c, doc)
+    v13(c, doc)
 
     for args in ({"doc": doc, "page": 1}, {"doc": doc, "id": "Render"}, {"doc": doc, "page": 2, "max_px": 600}):
         _, raw = c.call("indesign_capture", args)

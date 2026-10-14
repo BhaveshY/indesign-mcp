@@ -33,7 +33,7 @@ Steps (record PASS/FAIL + evidence for each):
    Verify: read what=items page=2 type=Rectangle shows 5 linked images; read what=tables id=<table> shows "Fläche m²" decoded correctly; A1..A3 share the same y and gaps are 10 mm (±0.05).
    Then one apply with typographic_quotes=false creating a text frame with text Typ "A" 5' → read it back raw: quotes must be straight.
 7. Create a text frame on page 3 with ~60 long paragraphs (overset), then apply op=flow on it → overset false, pages_added ≥ 1. Confirm with read what=document (issues.overset empty; counts.items equals read what=items total).
-8. indesign_capture page 1 and page 2 → look at the images and describe whether title, grid, captions and table look correct.
+8. indesign_capture page 1 and page 2 → look at the images and describe whether title, grid, captions and table look correct. Then capture page 2 with overlay=true (every frame labelled with its id; blue text, magenta graphic, orange other, red overset; cyan margins) and check that the labels match the ids from step 6; then zoom with around=<table frame id> and region=[15,15,60,40] and describe what is visible. Confirm with read what=document that counts/layers did not change (overlay renders from a temporary copy).
 9. Error handling (must return isError with error.next, and change nothing):
    a) apply set id=999999; b) apply with ops [create rect, set "Title" props {noSuchProperty:1}] → the created rect must be removed (compare read what=items total before/after); c) read what="nope".
 10. indesign_script: return {pages: D.pages.length, frames: D.textFrames.length}.

@@ -155,9 +155,19 @@ TOOLS = [
     {
         "name": "indesign_capture",
         "title": "See an InDesign page",
-        "description": "PNG of a page (default active page), a spread (spread=true) or one item (id). max_px caps the long side (default 1400).",
+        "description": (
+            "PNG of a page (default active page), a spread (spread=true) or one item alone (id). max_px caps the long side (default 1400). "
+            "overlay=true draws every item's outline + id label (blue text, magenta graphic, orange other, red OVERSET) and the "
+            "margin/column guides (guides=false hides them; nested=true labels group children; label_size pt). Zoom: "
+            "region=[x,y,w,h] (page-relative) or around=<id> (+pad, default 10) renders just that area at high resolution. "
+            "Overlay/zoom render a hidden temporary copy: the document itself is never changed."
+        ),
         "inputSchema": {"type": "object", "properties": {
             "doc": _doc, "page": _page, "id": _id, "spread": {"type": "boolean"},
+            "overlay": {"type": "boolean"}, "guides": {"type": "boolean"}, "nested": {"type": "boolean"},
+            "label_size": {"type": "number", "description": "label text size in pt (default: ~12 px in the image)"},
+            "region": {"type": "array", "items": {"type": "number"}, "description": "[x,y,w,h] page-relative zoom area"},
+            "around": _id, "pad": {"type": "number", "description": "margin around the `around` item (default 10)"},
             "max_px": {"type": "integer"}, "resolution": {"type": "number"}, "units": _units}},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
